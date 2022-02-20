@@ -1,0 +1,444 @@
+---
+title: "Genesis NFgenes assembly: Main frame"
+author: "Sebastian Hesse [Dr.Basi]"
+date: "1/27/2022"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+    code_folding: hide
+---
+
+```{r, SETUP: Packages, include=FALSE}
+
+## basic setup for document
+knitr::opts_chunk$set(warning=FALSE, message=FALSE) 
+
+
+# basics
+library(tidyverse) # always tidy
+library(magrittr) # pipe it
+library(readr) # data import
+library(rjson) # export JSON
+library(clipr) # copy/paste
+
+# data checks
+library(ggVennDiagram) # VENN diagrams
+
+library(UpSetR) # facy VENN
+library(gridExtra) #to arrange plots
+
+#annotations
+library(AnnotationDbi)
+library(org.Hs.eg.db)
+
+```
+
+```{r, SETUP: Functions, include=FALSE}
+
+# convert df to matrix
+df2m <- function(X) {
+  if (!methods::is(X, "matrix")) {
+    m <- as.matrix(X[, which(vapply(X, is.numeric, logical(1)))])
+  }
+  else {
+    m <- X
+  }
+  m
+}
+
+# make df, name rows UNIPROT and remove UNIPROT col
+UniToRow <- function(df){
+  df <- as.data.frame(df)
+  rownames(df) <- df$UNIPROT
+  df$UNIPROT <- NULL
+  return(df)
+}
+
+
+transpose_UNIPROTcols <- function(df){
+  UNIPROT <- df$UNIPROT
+  df$UNIPROT <- NULL
+  df_t <- as.data.frame(t(df))
+  colnames(df_t) <- UNIPROT
+  return(df_t)
+}
+
+
+
+#extract significant results
+get_sigs <- function(df, adj.p, FC){
+  df <- df[df$adj.P.Val < adj.p & abs(df$logFC) >= FC,]
+  return(df)
+}
+
+
+create_hdFCs <- function(exp_df, ids_healthy) {
+  exp_hd <- exp_df[,colnames(exp_df) %in% ids_healthy]
+  median_hd = apply(exp_hd, 1, median, na.rm = T)
+  hdFCs <- exp_df - median_hd
+  return(hdFCs)
+}
+
+
+factorisator_4san <- function(san){
+  as_factors <- names(san)
+  not_as_factors <- c("id", "id_primary_sample")
+  as_factors <- as_factors[! as_factors %in% not_as_factors]
+  san[as_factors] <- lapply(san[as_factors], as.factor)
+  san <- droplevels(san)
+  return(san)
+}
+
+
+col_classes <- function(df) {
+  data.frame(
+  variable = names(df),
+  class = unname(sapply(df, class))
+  )
+}
+
+
+#save plots
+
+# ggsave(
+#   "pca1to5_GenFamProt_rep.pdf",
+#   plot = last_plot(),
+#   device = "pdf",
+#   path = paste0(dir_project, "graphs/batchrection"),
+#   width = 60,
+#   height = 40,
+#   units = "cm",
+#   dpi = 300,
+#   limitsize = TRUE)
+
+#overwrite masked function names
+select <- dplyr::select
+rename <- dplyr::rename
+
+```
+
+Here we assemble the data for the genesis mint main frame. We aim for it to contain for each gene: - gene symbol - gene name - gene ID - length - chromosomal location
+
+# NCBI data import
+
+Downloaded gff3 file (RefSeq Reference Genome Annotation) from <https://www.ncbi.nlm.nih.gov/genome/guide/human/#download> at 24.01.22.
+
+Overview of the data:
+https://www.ncbi.nlm.nih.gov/genome/annotation_euk/Homo_sapiens/109.20211119/ 
+
+## Import and cleanup
+
+```{r, include=T}
+
+## import functions for gff format from https://support.bioconductor.org/p/24657/
+
+# function to import gff file
+gffRead <- function(gffFile, nrows = -1) {
+     cat("Reading ", gffFile, ": ", sep="")
+     gff = read.table(gffFile, sep="\t", as.is=TRUE, quote="",
+     header=FALSE, comment.char="#", nrows = nrows,
+     colClasses=c("character", "character", "character", "integer",
+"integer",
+     "character", "character", "character", "character"))
+     colnames(gff) = c("seqname", "source", "feature", "start", "end",
+             "score", "strand", "frame", "attributes")
+     cat("found", nrow(gff), "rows with classes:",
+         paste(sapply(gff, class), collapse=", "), "\n")
+     stopifnot(!anyNA(gff$start), !anyNA(gff$end))
+     return(gff)
+}
+
+# fct to split attributes
+getAttributeField <- function (x, field, attrsep = ";") {
+     s = strsplit(x, split = attrsep, fixed = TRUE)
+     sapply(s, function(atts) {
+         a = strsplit(atts, split = "=", fixed = TRUE)
+         m = match(field, sapply(a, "[", 1))
+         if (!is.na(m)) {
+             rv = a[[m]][2]
+         }
+         else {
+             rv = as.character(NA)
+         }
+         return(rv)
+     })
+}
+
+
+# parts below are computer intensive. End result was saved and is re-loaded below
+
+# # import NCBI (load compiled csv from below!)
+# NCBI_raw <- gffRead("/Users/sebastianhesse/Documents/NFT_projects/NFgenes/R_files/raw_data/GRCh38_latest_genomic.gff")
+# 
+# # reduce to genes (rest are other genome regions)
+# NCBI_raw_genes <- NCBI_raw %>% filter(feature == "gene")
+# 
+# # dissect attributes
+# NCBI_raw_genes$id_symbol_primary2 <- getAttributeField(NCBI_raw_genes$attributes, "ID") # many strange dashes that dont belong to the symbol. make secondary
+# NCBI_raw_genes$Ref <- getAttributeField(NCBI_raw_genes$attributes, "Dbxref")
+# NCBI_raw_genes$id_symbol_primary <- getAttributeField(NCBI_raw_genes$attributes, "Name") # clean symbols, use as primary!
+# NCBI_raw_genes$gbkey <- getAttributeField(NCBI_raw_genes$attributes, "gbkey")
+# NCBI_raw_genes$id_symbol_primary3 <- getAttributeField(NCBI_raw_genes$attributes, "gene")
+# NCBI_raw_genes$type_biotype <- getAttributeField(NCBI_raw_genes$attributes, "gene_biotype")
+# NCBI_raw_genes$id_symbol_alias <- getAttributeField(NCBI_raw_genes$attributes, "gene_synonym")
+# NCBI_raw_genes$id_protein_name <- getAttributeField(NCBI_raw_genes$attributes, "description")
+# 
+# ## clean cols
+# NCBI_raw_genes$id_symbol_primary <- gsub("^[^:]*gene-", "", NCBI_raw_genes$id_symbol_primary)
+# 
+# NCBI_raw_genes <- NCBI_raw_genes %>% separate(Ref, c("id_geneID", 'id_HGNC', 'id_miRBase'), ",")
+# NCBI_raw_genes$id_geneID <- gsub("^[^:]*GeneID:", "", NCBI_raw_genes$id_geneID)
+# NCBI_raw_genes$id_HGNC <- gsub("^[^:]*HGNC:HGNC:", "", NCBI_raw_genes$id_HGNC)
+# NCBI_raw_genes$id_miRBase <- gsub("^[^:]*miRBase:", "", NCBI_raw_genes$id_miRBase)
+# 
+# # clear MIM (OMIM ID) in miRBase field and add to own MIM_id col
+# NCBI_raw_genes$id_MIM <- NA
+# NCBI_raw_genes$id_MIM <- ifelse(str_detect(NCBI_raw_genes$id_miRBase, "MIM"), NCBI_raw_genes$id_miRBase, NA)
+# NCBI_raw_genes$id_miRBase <- ifelse(str_detect(NCBI_raw_genes$id_miRBase, "MIM"), NA, NCBI_raw_genes$id_miRBase)
+# NCBI_raw_genes$id_MIM <- gsub("MIM:", "", NCBI_raw_genes$id_MIM)
+# 
+# NCBI_preped <- NCBI_raw_genes
+# 
+# # save copy and reload
+# write_csv(NCBI_preped, "/Users/sebastianhesse/Documents/NFT_projects/NFgenes/R_files/compiled_data/NCBI_preped.csv")
+
+NCBI_preped <- read_csv("/Users/sebastianhesse/Documents/NFT_projects/NFgenes/R_files/compiled_data/NCBI_preped.csv")
+
+```
+
+## Chromosomes
+
+NC_ ids are easily coded for the chromosome:
+
+NC_000001.11: chr1, NC_000002.12: chr2, ..., NC_000023.11: chrX, NC_000024.10:chrY, NC_012920.1: chrM
+
+But there are many non-standard annotated genes we will need to take care of as well.
+
+```{r}
+# format standard annotated chromosomes
+NCBI_preped$chromosome <- NA
+NCBI_preped$chromosome <- ifelse(str_detect(NCBI_preped$seqname, "NC_"), NCBI_preped$seqname, NA)
+NCBI_preped$chromosome <- gsub("^[^:]*NC_00000", "", NCBI_preped$chromosome)
+NCBI_preped$chromosome <- gsub("^[^:]*NC_0000", "", NCBI_preped$chromosome)
+NCBI_preped$chromosome <- gsub("\\..*","",NCBI_preped$chromosome)
+NCBI_preped$chromosome <- ifelse(str_detect(NCBI_preped$seqname, "NC_012920"), "mito", NCBI_preped$chromosome) # NC_012920 is the mitochondrial genome
+NCBI_preped$chromosome <- ifelse(str_detect(NCBI_preped$seqname, "NC_012920"), "mito", NCBI_preped$chromosome)
+NCBI_preped %<>% mutate(chromosome = ifelse(chromosome == 23, "X", NCBI_preped$chromosome))
+NCBI_preped %<>% mutate(chromosome = ifelse(chromosome == 24, "Y", NCBI_preped$chromosome))
+
+
+## check for NA
+
+paste0("Are there any genes with missing chomosome information?")
+anyNA(NCBI_preped$chromosome) # there are non standard NC annotated gene regions
+
+paste0("How many genes are missing chomosome information?")
+NCBI_preped %>% filter(is.na(chromosome)) %>% nrow()
+# isolate
+NCBI_non_NC_chromosomes <- NCBI_preped %>% filter(is.na(chromosome))
+
+paste0("Which types of genes are missing chomosome information?")
+table(NCBI_non_NC_chromosomes$type_biotype)
+
+paste0("As there are too many now and no clear solution, we will take care of protein coding genes with missing chomosome info below.")
+
+```
+
+For the future, there is an initiative to resolve the problem of multiple accessions by using a "Universal Genomic Accession Hash (UGAHash)".
+We can read into this at a later time point and maybe include this into NFgenes: https://academic.oup.com/bib/article/18/2/226/2453279
+
+# Protein coding genes
+
+## Quality check
+```{r}
+
+NCBI_prot <- NCBI_preped %>% filter(type_biotype == "protein_coding")
+
+## format
+# col_classes(NCBI_prot) 
+NCBI_prot$id_geneID <- as.factor(NCBI_prot$id_geneID)
+
+## cleanup names
+
+## check
+
+# SYMBOLS
+paste0("Are there any NA in the NCBI primary symbols?")
+anyNA(NCBI_prot$id_symbol_primary) # no NAs
+# duplicates 
+paste0("Are there any duplicates in the NCBI primary symbols?")
+anyDuplicated(NCBI_prot$id_symbol_primary) # 19430 duplicates in symbols! The duplicates do not have a chromosome number and seem to be random double entries. Check gene_id first
+
+# GENE ID
+NCBI_prot[duplicated(NCBI_prot$id_geneID),] #there are 2815 duplicated gene IDs! Inspect
+duplicates_GeneID_NCBI <- NCBI_prot[duplicated(NCBI_prot$id_geneID),] #all of these genes are copies of already included genes. Also, they do not have a chromosome info or ocnflicting chromosome info that does not match with the gene cards entry. Remove!
+# nrow(duplicates_GeneID_NCBI) #ok
+
+# to remove them we will use the id_symbol_primary2 as these are unique. This will remove all duplicates
+
+NCBI_prot_unique <- NCBI_prot %>% filter(! id_symbol_primary2 %in% duplicates_GeneID_NCBI$id_symbol_primary2)
+
+## check duplicates
+anyDuplicated(NCBI_prot_unique$id_geneID) # no duplicate IDs!
+anyDuplicated(NCBI_prot_unique$id_symbol_primary) # no duplicate symbols!
+anyDuplicated(NCBI_prot_unique$id_protein_name) # 4 duplicates in protein names
+anyNA(NCBI_prot_unique$id_protein_name) # also NA
+
+## check protein names
+NCBI_prot_protNameDups <- NCBI_prot_unique %>% filter(! is.na(id_protein_name)) %>% filter(duplicated(id_protein_name))
+
+# Morf4 family associated protein 1 like 1: duplicate is a LOC gene -> will be removed
+# zinc finger and SCAN domain containing 29: dup is LOC gene
+# TP53-target gene 3 protein: both are LOC genes. 
+# cancer/testis antigen family 47 member A11: dup is LOC gene
+
+# -> all dups will be removed via removal of LOCs
+
+# some protein names have "%" instead of -. Exchange
+NCBI_prot_unique$id_protein_name <- gsub("%" ,"-", NCBI_prot_unique$id_protein_name)
+
+# make first letter upper but keep all upper part of names
+NCBI_prot_unique$id_protein_name <-  str_replace(NCBI_prot_unique$id_protein_name, "^\\w{1}", toupper)
+
+
+## Genes without proper symbols
+
+# remove LOC and ORF (= putative genes without biological info)
+Nr_LOC_in_NCBI <- sum(str_detect(NCBI_prot_unique$id_symbol_primary, "LOC[:digit:][:digit:][:digit:]")) 
+Nr_LOC_in_NCBI # 250 LOCs
+
+Nr_ORF_in_NCBI <- sum(str_detect(NCBI_prot_unique$id_symbol_primary, "orf")) 
+Nr_ORF_in_NCBI # 267 ORFs
+
+# extract symbols of LOC and ORF and remove
+LOC_in_NCBI <- NCBI_prot_unique %>% filter(str_detect(id_symbol_primary, 'LOC[:digit:][:digit:][:digit:]')) %>% pull(id_symbol_primary)
+# contains some readthroughwith unknown function. OK to remove
+
+ORF_in_NCBI <- NCBI_prot_unique %>% filter(str_detect(id_symbol_primary, 'orf')) %>% pull(id_symbol_primary)
+# contains some readthroughwith unknown function. OK to remove
+
+NCBI_prot_unique_noLOCnoORF <- NCBI_prot_unique %>% filter(! id_symbol_primary %in% c(LOC_in_NCBI, ORF_in_NCBI))
+
+# remove LOC and ORF genes
+NCBI_prot_prefinal <- NCBI_prot_unique_noLOCnoORF %>% select(id_symbol_primary, id_protein_name, id_geneID, chromosome, start, end, strand)
+
+```
+
+## Add missing data
+```{r}
+
+## check missing in prefinal data
+missing_protcoding_cols <- apply(NCBI_prot_prefinal, 2, function(x) any(is.na(x) | is.infinite(x)))
+paste0("Are there any information missing in the prefinal gene list?")
+missing_protcoding_cols
+paste0("Some are missing a protein name, some are missing a chomosome.")
+
+# subset
+NCBI_prot_NA_protName <- NCBI_prot_prefinal %>% filter(is.na(id_protein_name))
+
+NCBI_prot_NA_Chromosome <- NCBI_prot_prefinal %>% filter(is.na(chromosome))
+
+
+NCBI_prot_NA_protName_allinfo <- NCBI_prot_prefinal %>% filter(id_geneID %in% NCBI_prot_NA_protName$id_geneID)
+
+NCBI_prot_NA_Chromosome_allInfo <- NCBI_prot_prefinal %>% filter(id_geneID %in% NCBI_prot_NA_Chromosome$id_geneID)
+
+## get info from manual search
+
+# chromosome
+# write_clip(NCBI_prot_NA_Chromosome$id_symbol_primary)
+# https://docs.google.com/spreadsheets/d/1hpIE8RX4W9MYYYfFLzONBkf13oWkeRiiHboMFQyi9pk/edit?usp=sharing
+manual_chomosomes_NCBI <-  read_csv("/Users/sebastianhesse/Documents/NFT_projects/NFgenes/R_files/raw_data/missing_chomosomes.csv")
+
+# protein name
+# write_clip(NCBI_prot_NA_protName_allinfo$id_symbol_primary)
+# https://docs.google.com/spreadsheets/d/1r4fwurJvY6p1yKtNimyPJPlMoN1Xa8d0I4xjvdTg0A8/edit?usp=sharing 
+manual_protNames_NCBI <- read_csv("/Users/sebastianhesse/Documents/NFT_projects/NFgenes/R_files/raw_data/missing_protein_name_NCBI_02_2022 - Tabellenblatt1(3).csv")
+
+paste0("All missing data could be added via https://www.genecards.org")
+
+
+# add data
+NCBI_prot_prefinal_added <- NCBI_prot_prefinal %>% left_join(manual_protNames_NCBI, by= c("id_symbol_primary" = 'id_symbol'))
+
+NCBI_prot_prefinal_added <- NCBI_prot_prefinal_added %>% left_join(manual_chomosomes_NCBI, by= c("id_symbol_primary" = 'id_symbol'))
+
+## concatenate
+#format
+NCBI_prot_prefinal_added$chromosome.y <- as.factor(NCBI_prot_prefinal_added$chromosome.y)
+NCBI_prot_prefinal_added$chromosome.x <- as.factor(NCBI_prot_prefinal_added$chromosome.x)
+
+NCBI_prot_prefinal_clean <- NCBI_prot_prefinal_added %>% 
+  mutate(id_protein_name = coalesce(
+  id_protein_name.x,
+  id_protein_name.y)) %>%
+  mutate(chromosome = coalesce(
+  chromosome.x,
+  chromosome.y)) %>%
+         select(- c(id_protein_name.x, id_protein_name.y, chromosome.x, chromosome.y))
+
+
+## check NA
+missing_NCBI_prefinal_clean <- apply(NCBI_prot_prefinal_clean, 2, function(x) any(is.na(x) | is.infinite(x)))
+paste0("Are there any information missing in the prefinal gene list?")
+missing_NCBI_prefinal_clean
+paste0("Some are no missing data in the manually curated NCBI gene list.")
+
+## add length
+NCBI_prot_prefinal_clean$length <- NCBI_prot_prefinal_clean$end - NCBI_prot_prefinal_clean$start
+
+NCBI_prot_final <- NCBI_prot_prefinal_clean
+```
+
+## Analysis
+```{r}
+
+# Number of protein coding genes
+NCBI_prot_nr <- NCBI_prot_final %>% nrow()
+
+paste("From NCBI we collected the data of", NCBI_prot_nr, "unique protein coding genes with protein names and defined gene location (chromosome, start, end, length, strand)" )
+
+
+## histograms
+
+# gene length
+NCBI_prot_final %>% 
+   ggplot(aes(x= length)) +
+   geom_histogram()
+
+NCBI_prot_final %>% 
+  mutate(length_lg = log2(length)) %>%
+   ggplot(aes(x= length_lg)) +
+   geom_histogram()
+
+
+```
+
+The NCBI protein coding genes be the basis of our genesis mint.
+
+
+# NFgenes main frame
+
+The main frame will contain cleaned data from NCBI: Symbol, protein name, length, chromosome, start, end and strand. We will use the symbol as our primary ID.
+
+Final data will be turned into JSON and exported
+
+```{r}
+
+NFgenes_main <- NCBI_prot_final
+
+NFgenes_main_json <- toJSON(NFgenes_main)
+
+```
+
+
+# Export
+
+```{r}
+
+write(NFgenes_main_json, "/Users/sebastianhesse/Documents/NFT_projects/NFgenes/R_files/compiled_data/NFgenes_main.json")
+
+
+```
